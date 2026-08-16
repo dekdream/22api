@@ -13,14 +13,63 @@ const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_R
 });
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
+const businessTimeZone = process.env.BUSINESS_TIME_ZONE || 'Asia/Bangkok';
 const origins = (process.env.CLIENT_ORIGIN || '').split(',').map((x) => x.trim()).filter(Boolean);
 app.use(cors({ origin: origins.length ? origins : false }));
 app.use(express.json({ limit: '1mb' }));
 
-const tableAccess = new Set(['branches', 'positions', 'employees', 'customers', 'announcements', 'payroll', 'attendance', 'services', 'service_history', 'calendar_events', 'leave_requests', 'leave_type', 'notifications']);
+// These are the resources used by the current Flutter app.  `departments` and
+// QR-attendance sessions were retired from the schema, so they intentionally
+// are not exposed here.
+const tableAccess = new Set([
+  'branches', 'positions', 'employees', 'customers', 'announcements',
+  'payroll', 'attendance', 'services', 'service_history', 'calendar_events',
+  'leave_requests', 'leave_type', 'notifications', 'commission',
+  'queue_bookings',
+]);
 const employeeSelect = '*, positions(name, salary), branches(branch_code, branch_name)';
+const tableSelect = {
+  employees: employeeSelect,
+  customers: '*, branches(branch_code, branch_name)',
+  payroll: '*, employees(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
+  attendance: '*, employees(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
+  service_history: '*, services(name), employees(first_name, last_name, employee_code, branch_id, branches(branch_name))',
+  leave_requests: '*, leave_type(name), employees(employee_code, first_name, last_name, branch_id)',
+  commission: '*, employees(employee_code, first_name, last_name, branch_id)',
+  queue_bookings: '*, services(name), employees(first_name, last_name, employee_code), branches(branch_name)',
+};
+// PostgREST only filters the parent rows through an embedded relation when
+// the relation is marked `!inner`.
+const branchScopedTableSelect = {
+  payroll: '*, employees!inner(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
+  attendance: '*, employees!inner(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
+  service_history: '*, services(name), employees!inner(first_name, last_name, employee_code, branch_id, branches(branch_name))',
+  leave_requests: '*, leave_type(name), employees!inner(employee_code, first_name, last_name, branch_id)',
+  commission: '*, employees!inner(employee_code, first_name, last_name, branch_id)',
+};
+const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings']);
+const employeeBranchTables = new Set(['payroll', 'attendance', 'service_history', 'leave_requests', 'commission']);
+const employeeReferencedTables = new Set([...employeeBranchTables, 'notifications']);
 
 function fail(res, status, message) { return res.status(status).json({ error: message }); }
+function selectFor(actor, table) {
+  return actor.role === 'owner'
+    ? (tableSelect[table] ?? '*')
+    : (branchScopedTableSelect[table] ?? tableSelect[table] ?? '*');
+}
+function businessDate(value) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: businessTimeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(value);
+  const part = (type) => parts.find((item) => item.type === type)?.value;
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+function imageExtension(file) {
+  if (file.mimetype === 'image/png') return 'png';
+  if (file.mimetype === 'image/webp') return 'webp';
+  if (file.mimetype === 'image/jpeg') return 'jpg';
+  return null;
+}
 function roleFor(employee) {
   const name = String(employee.positions?.name ?? '').toLowerCase();
   if (name === 'owner') return employee.branch_id ? 'branchOwner' : 'owner';
@@ -36,13 +85,53 @@ function authorize(req, res, next) {
 function canManage(actor) { return actor.role === 'owner' || actor.role === 'branchOwner' || actor.role === 'admin'; }
 function scopedData(req, table, body) {
   const data = { ...body };
-  if ((req.actor.role === 'branchOwner' || req.actor.role === 'admin') && ['employees', 'customers', 'announcements'].includes(table)) data.branch_id = req.actor.branch_id;
+  if (req.actor.role === 'branchOwner' || req.actor.role === 'admin') {
+    if (table === 'employees' || directBranchTables.has(table)) data.branch_id = req.actor.branch_id;
+  }
   return data;
 }
 function guardTable(req, res, next) {
   if (!tableAccess.has(req.params.table)) return fail(res, 404, 'Unknown resource');
   if (!canManage(req.actor)) return fail(res, 403, 'Manager access required');
   if (req.actor.role !== 'owner' && req.params.table === 'branches') return fail(res, 403, 'Only owner can manage branches');
+  return next();
+}
+
+function applyBranchScope(query, actor, table) {
+  if (actor.role === 'owner') return query;
+  if (table === 'employees') return query.eq('branch_id', actor.branch_id);
+  if (directBranchTables.has(table)) return query.eq('branch_id', actor.branch_id);
+  if (employeeBranchTables.has(table)) return query.eq('employees.branch_id', actor.branch_id);
+  if (table === 'notifications') return query.eq('employee_id', actor.employee_id);
+  return query;
+}
+
+async function canAccessRecord(actor, table, id) {
+  if (actor.role === 'owner') return true;
+  if (table === 'branches' || table === 'positions' || table === 'services' || table === 'leave_type') return false;
+  let query = db.from(table).select(selectFor(actor, table)).eq('id', id);
+  query = applyBranchScope(query, actor, table);
+  const { data, error } = await query.maybeSingle();
+  if (error) throw error;
+  return Boolean(data);
+}
+
+async function requireRecordAccess(req, res, next) {
+  try {
+    if (!await canAccessRecord(req.actor, req.params.table, req.params.id)) {
+      return fail(res, 404, 'Resource not found');
+    }
+    return next();
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+}
+
+async function requirePayloadScope(req, res, next) {
+  if (req.actor.role === 'owner' || !employeeReferencedTables.has(req.params.table) || !req.body?.employee_id) return next();
+  const { data, error } = await db.from('employees').select('id').eq('id', req.body.employee_id).eq('branch_id', req.actor.branch_id).maybeSingle();
+  if (error) return fail(res, 400, error.message);
+  if (!data) return fail(res, 403, 'Employee is outside your branch');
   return next();
 }
 
@@ -67,22 +156,28 @@ app.use('/v1', authorize);
 app.get('/v1/tables/:table', guardTable, async (req, res) => {
   const { table } = req.params;
   const { orderBy = 'id', branchId } = req.query;
-  let query = db.from(table).select(table === 'employees' ? employeeSelect : '*').order(orderBy);
-  if (branchId) query = query.eq(table === 'branches' ? 'id' : 'branch_id', branchId);
-  else if (req.actor.role !== 'owner' && ['employees', 'customers', 'announcements', 'calendar_events'].includes(table)) query = query.eq('branch_id', req.actor.branch_id);
+  let query = db.from(table).select(selectFor(req.actor, table));
+  query = applyBranchScope(query, req.actor, table);
+  // Only the owner can choose a branch other than their own scope.
+  if (branchId && req.actor.role === 'owner') {
+    if (table === 'branches') query = query.eq('id', branchId);
+    else if (table === 'employees' || directBranchTables.has(table)) query = query.eq('branch_id', branchId);
+    else if (employeeBranchTables.has(table)) query = query.eq('employees.branch_id', branchId);
+  }
+  query = query.order(orderBy);
   const { data, error } = await query;
   if (error) return fail(res, 400, error.message);
   return res.json(data);
 });
-app.post('/v1/tables/:table', guardTable, async (req, res) => {
+app.post('/v1/tables/:table', guardTable, requirePayloadScope, async (req, res) => {
   const { data, error } = await db.from(req.params.table).insert(scopedData(req, req.params.table, req.body)).select().single();
   if (error) return fail(res, 400, error.message); return res.status(201).json(data);
 });
-app.patch('/v1/tables/:table/:id', guardTable, async (req, res) => {
+app.patch('/v1/tables/:table/:id', guardTable, requireRecordAccess, requirePayloadScope, async (req, res) => {
   const { error } = await db.from(req.params.table).update(scopedData(req, req.params.table, req.body)).eq('id', req.params.id);
   if (error) return fail(res, 400, error.message); return res.status(204).end();
 });
-app.delete('/v1/tables/:table/:id', guardTable, async (req, res) => {
+app.delete('/v1/tables/:table/:id', guardTable, requireRecordAccess, async (req, res) => {
   const { error } = await db.from(req.params.table).delete().eq('id', req.params.id);
   if (error) return fail(res, 400, error.message); return res.status(204).end();
 });
@@ -94,20 +189,36 @@ app.get('/v1/me/attendance', async (req, res) => {
 });
 app.post('/v1/me/attendance/photo', upload.single('photo'), async (req, res) => {
   if (!req.file) return fail(res, 400, 'photo is required');
+  const extension = imageExtension(req.file);
+  if (!extension) return fail(res, 400, 'photo must be a JPEG, PNG, or WebP image');
   const checkIn = req.body.checkIn === 'true'; const capturedAt = new Date(req.body.capturedAt);
   if (Number.isNaN(capturedAt.valueOf())) return fail(res, 400, 'capturedAt is invalid');
-  const extension = req.file.mimetype === 'image/png' ? 'png' : 'jpg';
   const path = `attendance/${req.actor.employee_id}/${capturedAt.valueOf()}.${extension}`;
   const { error: uploadError } = await db.storage.from('attendance-photos').upload(path, req.file.buffer, { contentType: req.file.mimetype, upsert: false });
   if (uploadError) return fail(res, 400, uploadError.message);
   const { data: { publicUrl } } = db.storage.from('attendance-photos').getPublicUrl(path);
-  const workDate = capturedAt.toISOString().slice(0, 10);
+  const workDate = businessDate(capturedAt);
   const { data: existing, error: findError } = await db.from('attendance').select().eq('employee_id', req.actor.employee_id).eq('work_date', workDate).maybeSingle();
   if (findError) return fail(res, 400, findError.message);
   const values = checkIn ? { check_in: capturedAt.toISOString(), check_in_photo_url: publicUrl, status: 'Present' } : { check_out: capturedAt.toISOString(), check_out_photo_url: publicUrl };
   if (!existing && !checkIn) return fail(res, 400, 'Check in before checking out');
   const result = existing ? await db.from('attendance').update(values).eq('id', existing.id) : await db.from('attendance').insert({ ...values, employee_id: req.actor.employee_id, work_date: workDate });
   if (result.error) return fail(res, 400, result.error.message); return res.status(204).end();
+});
+
+app.post('/v1/me/profile-photo', upload.single('photo'), async (req, res) => {
+  if (!req.file) return fail(res, 400, 'photo is required');
+  const extension = imageExtension(req.file);
+  if (!extension) return fail(res, 400, 'photo must be a JPEG, PNG, or WebP image');
+  const path = `employees/${req.actor.employee_id}/${Date.now()}.${extension}`;
+  const { error: uploadError } = await db.storage.from('profile').upload(path, req.file.buffer, {
+    contentType: req.file.mimetype, upsert: false,
+  });
+  if (uploadError) return fail(res, 400, uploadError.message);
+  const { data: { publicUrl } } = db.storage.from('profile').getPublicUrl(path);
+  const { error } = await db.from('employees').update({ profile_image: publicUrl }).eq('id', req.actor.employee_id);
+  if (error) return fail(res, 400, error.message);
+  return res.json({ profile_image: publicUrl });
 });
 
 app.use((err, _, res, __) => { console.error(err); return fail(res, 500, 'Internal server error'); });
