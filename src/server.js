@@ -14,22 +14,8 @@ const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_R
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 const businessTimeZone = process.env.BUSINESS_TIME_ZONE || 'Asia/Bangkok';
-const origins = (process.env.CLIENT_ORIGIN || '')
-  .split(',')
-  .map((x) => x.trim())
-  .filter(Boolean);
-
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow non-browser requests and local Flutter Web development servers.
-    if (!origin || origin.startsWith('http://localhost:')) {
-      return callback(null, true);
-    }
-    return callback(null, origins.includes(origin));
-  },
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+const origins = (process.env.CLIENT_ORIGIN || '').split(',').map((x) => x.trim()).filter(Boolean);
+app.use(cors({ origin: origins.length ? origins : false }));
 app.use(express.json({ limit: '1mb' }));
 
 // These are the resources used by the current Flutter app.  `departments` and
@@ -48,9 +34,7 @@ const tableSelect = {
   payroll: '*, employees(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
   attendance: '*, employees(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
   service_history: '*, services(name), employees(first_name, last_name, employee_code, branch_id, branches(branch_name))',
-  // leave_requests also has reviewed_by -> employees, so disambiguate the
-  // employee relation used by employee_id.
-  leave_requests: '*, leave_type(name), employees!leave_requests_employee_id_fkey(employee_code, first_name, last_name, branch_id)',
+  leave_requests: '*, leave_type(name), employees(employee_code, first_name, last_name, branch_id)',
   commission: '*, employees(employee_code, first_name, last_name, branch_id)',
   queue_bookings: '*, services(name), employees(first_name, last_name, employee_code), branches(branch_name)',
 };
@@ -60,7 +44,7 @@ const branchScopedTableSelect = {
   payroll: '*, employees!inner(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
   attendance: '*, employees!inner(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
   service_history: '*, services(name), employees!inner(first_name, last_name, employee_code, branch_id, branches(branch_name))',
-  leave_requests: '*, leave_type(name), employees!leave_requests_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
+  leave_requests: '*, leave_type(name), employees!inner(employee_code, first_name, last_name, branch_id)',
   commission: '*, employees!inner(employee_code, first_name, last_name, branch_id)',
 };
 const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings']);
@@ -107,28 +91,9 @@ function scopedData(req, table, body) {
   return data;
 }
 function guardTable(req, res, next) {
-  if (!tableAccess.has(req.params.table)) {
-    return fail(res, 404, 'Unknown resource');
-  }
-
-  const isOwnerOrAdmin =
-    req.actor.role === 'owner' || req.actor.role === 'admin';
-
-  if (req.params.table === 'service_history' && !isOwnerOrAdmin) {
-    return fail(res, 403, 'Owner or admin access required');
-  }
-
-  if (!canManage(req.actor)) {
-    return fail(res, 403, 'Manager access required');
-  }
-
-  if (
-    req.actor.role !== 'owner' &&
-    req.params.table === 'branches'
-  ) {
-    return fail(res, 403, 'Only owner can manage branches');
-  }
-
+  if (!tableAccess.has(req.params.table)) return fail(res, 404, 'Unknown resource');
+  if (!canManage(req.actor)) return fail(res, 403, 'Manager access required');
+  if (req.actor.role !== 'owner' && req.params.table === 'branches') return fail(res, 403, 'Only owner can manage branches');
   return next();
 }
 
