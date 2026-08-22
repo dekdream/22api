@@ -223,9 +223,14 @@ app.use('/v1', authorize);
 
 app.get('/v1/tables/:table', guardTableRead, async (req, res) => {
   const { table } = req.params;
-  const { orderBy = 'id', branchId } = req.query;
+  const { orderBy = 'id', branchId, workDate, workDateFrom, workDateTo } = req.query;
   let query = db.from(table).select(selectFor(req.actor, table));
   query = applyBranchScope(query, req.actor, table);
+  if (table === 'attendance') {
+    if (workDate) query = query.eq('work_date', workDate);
+    if (workDateFrom) query = query.gte('work_date', workDateFrom);
+    if (workDateTo) query = query.lte('work_date', workDateTo);
+  }
   // Only the owner can choose a branch other than their own scope.
   if (branchId && req.actor.role === 'owner') {
     if (table === 'branches') query = query.eq('id', branchId);
