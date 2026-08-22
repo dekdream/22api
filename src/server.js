@@ -283,12 +283,13 @@ app.post('/v1/me/attendance/photo', upload.single('photo'), async (req, res) => 
 });
 
 async function saveProfilePhoto(req, res, employeeId) {
-  if (!req.file) return fail(res, 400, 'photo is required');
-  const extension = imageExtension(req.file);
+  const photo = req.file ?? (Array.isArray(req.files) ? req.files[0] : null);
+  if (!photo) return fail(res, 400, 'photo is required');
+  const extension = imageExtension(photo);
   if (!extension) return fail(res, 400, 'photo must be a JPEG, PNG, or WebP image');
   const path = `employees/${employeeId}/${Date.now()}.${extension}`;
-  const { error: uploadError } = await db.storage.from('profile').upload(path, req.file.buffer, {
-    contentType: req.file.mimetype, upsert: false,
+  const { error: uploadError } = await db.storage.from('profile').upload(path, photo.buffer, {
+    contentType: photo.mimetype || 'image/jpeg', upsert: false,
   });
   if (uploadError) return fail(res, 400, uploadError.message);
   const { data: { publicUrl } } = db.storage.from('profile').getPublicUrl(path);
@@ -301,11 +302,11 @@ async function saveProfilePhoto(req, res, employeeId) {
 }
 
 // Employees may update their own profile photo.
-app.post('/v1/me/profile-photo', upload.single('photo'), async (req, res) =>
+app.post('/v1/me/profile-photo', upload.any(), async (req, res) =>
   saveProfilePhoto(req, res, req.actor.employee_id));
 
 // Owner/admin may update a selected employee's profile photo from management.
-app.post('/v1/employees/:id/profile-photo', upload.single('photo'), async (req, res) => {
+app.post('/v1/employees/:id/profile-photo', upload.any(), async (req, res) => {
   if (!canManage(req.actor)) return fail(res, 403, 'Manager access required');
   return saveProfilePhoto(req, res, req.params.id);
 });
