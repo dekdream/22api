@@ -84,6 +84,12 @@ function imageExtension(file) {
   if (file.mimetype === 'image/png') return 'png';
   if (file.mimetype === 'image/webp') return 'webp';
   if (file.mimetype === 'image/jpeg') return 'jpg';
+  // Flutter Web may send MultipartFile.fromBytes as application/octet-stream.
+  // Fall back to the uploaded filename in that case.
+  const extension = String(file.originalname || '').toLowerCase().split('.').pop();
+  if (extension === 'png') return 'png';
+  if (extension === 'webp') return 'webp';
+  if (extension === 'jpg' || extension === 'jpeg') return 'jpg';
   return null;
 }
 function roleFor(employee) {
