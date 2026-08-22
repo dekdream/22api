@@ -91,9 +91,28 @@ function scopedData(req, table, body) {
   return data;
 }
 function guardTable(req, res, next) {
-  if (!tableAccess.has(req.params.table)) return fail(res, 404, 'Unknown resource');
-  if (!canManage(req.actor)) return fail(res, 403, 'Manager access required');
-  if (req.actor.role !== 'owner' && req.params.table === 'branches') return fail(res, 403, 'Only owner can manage branches');
+  if (!tableAccess.has(req.params.table)) {
+    return fail(res, 404, 'Unknown resource');
+  }
+
+  const isOwnerOrAdmin =
+    req.actor.role === 'owner' || req.actor.role === 'admin';
+
+  if (req.params.table === 'service_history' && !isOwnerOrAdmin) {
+    return fail(res, 403, 'Owner or admin access required');
+  }
+
+  if (!canManage(req.actor)) {
+    return fail(res, 403, 'Manager access required');
+  }
+
+  if (
+    req.actor.role !== 'owner' &&
+    req.params.table === 'branches'
+  ) {
+    return fail(res, 403, 'Only owner can manage branches');
+  }
+
   return next();
 }
 
