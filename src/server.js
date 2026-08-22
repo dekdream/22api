@@ -14,54 +14,38 @@ const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_R
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 const businessTimeZone = process.env.BUSINESS_TIME_ZONE || 'Asia/Bangkok';
-const origins = (process.env.CLIENT_ORIGIN || '')
-  .split(',')
-  .map((x) => x.trim())
-  .filter(Boolean);
-
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow non-browser requests and local Flutter Web development servers.
-    if (!origin || origin.startsWith('http://localhost:')) {
-      return callback(null, true);
-    }
-    return callback(null, origins.includes(origin));
-  },
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+const origins = (process.env.CLIENT_ORIGIN || '').split(',').map((x) => x.trim()).filter(Boolean);
+app.use(cors({ origin: origins.length ? origins : false }));
 app.use(express.json({ limit: '1mb' }));
 
-// Resources used by the Flutter app. QR-attendance sessions are not part of
-// the current schema, but departments are and must remain available.
+// These are the resources used by the current Flutter app.  `departments` and
+// QR-attendance sessions were retired from the schema, so they intentionally
+// are not exposed here.
 const tableAccess = new Set([
-  'branches', 'departments', 'positions', 'employees', 'customers', 'announcements',
+  'branches', 'positions', 'employees', 'customers', 'announcements',
   'payroll', 'attendance', 'services', 'service_history', 'calendar_events',
   'leave_requests', 'leave_type', 'notifications', 'commission',
   'queue_bookings',
 ]);
 const employeeSelect = '*, positions(name, salary), branches(branch_code, branch_name)';
 const tableSelect = {
-  positions: '*, departments(name)',
   employees: employeeSelect,
   customers: '*, branches(branch_code, branch_name)',
   payroll: '*, employees(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
   attendance: '*, employees(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
-  service_history: '*, services(name), employees!service_history_employee_id_fkey(first_name, last_name, employee_code, branch_id, branches(branch_name))',
-  // leave_requests also has reviewed_by -> employees, so disambiguate the
-  // employee relation used by employee_id.
-  leave_requests: '*, leave_type(name), employees!leave_requests_employee_id_fkey(employee_code, first_name, last_name, branch_id)',
-  commission: '*, employees!commission_employee_id_fkey(employee_code, first_name, last_name, branch_id)',
-  queue_bookings: '*, services(name), employees!queue_bookings_employee_id_fkey(first_name, last_name, employee_code), branches(branch_name)',
+  service_history: '*, services(name), employees(first_name, last_name, employee_code, branch_id, branches(branch_name))',
+  leave_requests: '*, leave_type(name), employees(employee_code, first_name, last_name, branch_id)',
+  commission: '*, employees(employee_code, first_name, last_name, branch_id)',
+  queue_bookings: '*, services(name), employees(first_name, last_name, employee_code), branches(branch_name)',
 };
 // PostgREST only filters the parent rows through an embedded relation when
 // the relation is marked `!inner`.
 const branchScopedTableSelect = {
   payroll: '*, employees!inner(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
   attendance: '*, employees!inner(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
-  service_history: '*, services(name), employees!service_history_employee_id_fkey!inner(first_name, last_name, employee_code, branch_id, branches(branch_name))',
-  leave_requests: '*, leave_type(name), employees!leave_requests_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
-  commission: '*, employees!commission_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
+  service_history: '*, services(name), employees!inner(first_name, last_name, employee_code, branch_id, branches(branch_name))',
+  leave_requests: '*, leave_type(name), employees!inner(employee_code, first_name, last_name, branch_id)',
+  commission: '*, employees!inner(employee_code, first_name, last_name, branch_id)',
 };
 const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings']);
 const employeeBranchTables = new Set(['payroll', 'attendance', 'service_history', 'leave_requests', 'commission']);
@@ -84,12 +68,6 @@ function imageExtension(file) {
   if (file.mimetype === 'image/png') return 'png';
   if (file.mimetype === 'image/webp') return 'webp';
   if (file.mimetype === 'image/jpeg') return 'jpg';
-  // Flutter Web may send MultipartFile.fromBytes as application/octet-stream.
-  // Fall back to the uploaded filename in that case.
-  const extension = String(file.originalname || '').toLowerCase().split('.').pop();
-  if (extension === 'png') return 'png';
-  if (extension === 'webp') return 'webp';
-  if (extension === 'jpg' || extension === 'jpeg') return 'jpg';
   return null;
 }
 function roleFor(employee) {
@@ -113,59 +91,14 @@ function scopedData(req, table, body) {
   return data;
 }
 function guardTable(req, res, next) {
-  if (!tableAccess.has(req.params.table)) {
-    return fail(res, 404, 'Unknown resource');
-  }
-
-  const isOwnerOrAdmin =
-    req.actor.role === 'owner' || req.actor.role === 'admin';
-
-  if (req.params.table === 'service_history' && !isOwnerOrAdmin) {
-    return fail(res, 403, 'Owner or admin access required');
-  }
-
-  if (!canManage(req.actor)) {
-    return fail(res, 403, 'Manager access required');
-  }
-
-  if (
-    req.actor.role !== 'owner' &&
-    req.params.table === 'branches'
-  ) {
-    return fail(res, 403, 'Only owner can manage branches');
-  }
-
+  if (!tableAccess.has(req.params.table)) return fail(res, 404, 'Unknown resource');
+  if (!canManage(req.actor)) return fail(res, 403, 'Manager access required');
+  if (req.actor.role !== 'owner' && req.params.table === 'branches') return fail(res, 403, 'Only owner can manage branches');
   return next();
-}
-
-function guardTableRead(req, res, next) {
-  if (!tableAccess.has(req.params.table)) {
-    return fail(res, 404, 'Unknown resource');
-  }
-  if (canManage(req.actor)) return next();
-
-  // Employees may read only data needed by their own portal. The query scope
-  // below limits employee-linked tables to the logged-in employee/branch.
-  const employeeReadable = new Set([
-    'employees', 'announcements', 'payroll', 'attendance',
-    'leave_requests', 'service_history', 'calendar_events', 'notifications',
-    'services', 'leave_type',
-  ]);
-  if (req.actor.role === 'employee' && employeeReadable.has(req.params.table)) {
-    return next();
-  }
-  return fail(res, 403, 'Access denied');
 }
 
 function applyBranchScope(query, actor, table) {
   if (actor.role === 'owner') return query;
-  if (actor.role === 'employee') {
-    if (employeeBranchTables.has(table)) return query.eq('employee_id', actor.employee_id);
-    if (table === 'employees') return query.eq('id', actor.employee_id);
-    if (directBranchTables.has(table)) return query.eq('branch_id', actor.branch_id);
-    if (table === 'notifications') return query.eq('employee_id', actor.employee_id);
-    return query;
-  }
   if (table === 'employees') return query.eq('branch_id', actor.branch_id);
   if (directBranchTables.has(table)) return query.eq('branch_id', actor.branch_id);
   if (employeeBranchTables.has(table)) return query.eq('employees.branch_id', actor.branch_id);
@@ -220,7 +153,7 @@ app.post('/v1/auth/login', async (req, res) => {
 
 app.use('/v1', authorize);
 
-app.get('/v1/tables/:table', guardTableRead, async (req, res) => {
+app.get('/v1/tables/:table', guardTable, async (req, res) => {
   const { table } = req.params;
   const { orderBy = 'id', branchId } = req.query;
   let query = db.from(table).select(selectFor(req.actor, table));
