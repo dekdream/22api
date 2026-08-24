@@ -3,14 +3,10 @@ import cors from 'cors';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
-import { createClient } from '@supabase/supabase-js';
+import { db } from './postgres.js';
 
-const required = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'API_JWT_SECRET'];
+const required = ['DATABASE_URL', 'API_JWT_SECRET'];
 for (const key of required) if (!process.env[key]) throw new Error(`Missing ${key} in .env`);
-
-const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 const businessTimeZone = process.env.BUSINESS_TIME_ZONE || 'Asia/Bangkok';
