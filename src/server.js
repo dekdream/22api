@@ -311,7 +311,10 @@ app.post('/v1/me/attendance/photo', upload.single('photo'), async (req, res) => 
     console.error('Attendance photo storage upload failed:', error.name, error.Code, error.message);
     return fail(res, 502, `Could not save attendance photo: ${error.message}`);
   }
-  const workDate = businessDate(capturedAt);
+  const requestedWorkDate = String(req.body.workDate || '').trim();
+  const workDate = /^\d{4}-\d{2}-\d{2}$/.test(requestedWorkDate)
+    ? requestedWorkDate
+    : businessDate(capturedAt);
   const { data: existing, error: findError } = await db.from('attendance').select().eq('employee_id', req.actor.employee_id).eq('work_date', workDate).maybeSingle();
   if (findError) return fail(res, 400, findError.message);
   const values = checkIn ? { check_in: capturedAt.toISOString(), check_in_photo_url: publicUrl, status: 'Present' } : { check_out: capturedAt.toISOString(), check_out_photo_url: publicUrl };
