@@ -12,8 +12,8 @@ for (const key of required) if (!process.env[key]) throw new Error(`Missing ${ke
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 const s3Endpoint = process.env.S3_ENDPOINT || process.env.AWS_ENDPOINT_URL || process.env.AWS_S3_ENDPOINT || 'https://t3.storageapi.dev';
-const s3Region = process.env.S3_REGION || process.env.AWS_REGION || 'auto';
-const s3Bucket = process.env.S3_BUCKET_NAME || process.env.S3_BUCKET || process.env.AWS_BUCKET_NAME || process.env.AWS_S3_BUCKET || process.env.BUCKET_NAME;
+const s3Region = process.env.S3_REGION || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'auto';
+const s3Bucket = process.env.S3_BUCKET_NAME || process.env.S3_BUCKET || process.env.AWS_BUCKET_NAME || process.env.AWS_S3_BUCKET_NAME || process.env.AWS_S3_BUCKET || process.env.BUCKET_NAME;
 const s3AccessKeyId = process.env.S3_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
 const s3SecretAccessKey = process.env.S3_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
 const s3 = new S3Client({ endpoint: s3Endpoint, region: s3Region, forcePathStyle: true, credentials: { accessKeyId: s3AccessKeyId, secretAccessKey: s3SecretAccessKey } });
@@ -222,6 +222,13 @@ async function requirePayloadScope(req, res, next) {
 }
 
 app.get('/health', (_, res) => res.json({ ok: true }));
+app.get('/health/storage', (_, res) => res.json({
+  ok: Boolean(s3Bucket && s3AccessKeyId && s3SecretAccessKey),
+  provider: 's3-compatible',
+  endpoint: s3Endpoint,
+  bucketConfigured: Boolean(s3Bucket),
+  credentialsConfigured: Boolean(s3AccessKeyId && s3SecretAccessKey),
+}));
 
 // This preserves the app's current username + employee-code login flow. Employee codes are not passwords.
 app.post('/v1/auth/login', async (req, res) => {
@@ -287,8 +294,8 @@ app.post('/v1/me/attendance/photo', upload.single('photo'), async (req, res) => 
   try {
     publicUrl = await saveUpload('attendance-photos', `${req.actor.employee_id}/${capturedAt.valueOf()}-${randomUUID()}.${extension}`, req.file);
   } catch (error) {
-    console.error('Attendance photo storage upload failed:', error);
-    return fail(res, 500, 'Could not save attendance photo');
+    console.error('Attendance photo storage upload failed:', error.name, error.Code, error.message);
+    return fail(res, 502, `Could not save attendance photo: ${error.message}`);
   }
   const workDate = businessDate(capturedAt);
   const { data: existing, error: findError } = await db.from('attendance').select().eq('employee_id', req.actor.employee_id).eq('work_date', workDate).maybeSingle();
@@ -308,8 +315,8 @@ async function saveProfilePhoto(req, res, employeeId) {
   try {
     publicUrl = await saveUpload('profile', `${employeeId}/${Date.now()}-${randomUUID()}.${extension}`, photo);
   } catch (error) {
-    console.error('Profile photo storage upload failed:', error);
-    return fail(res, 500, 'Could not save profile photo');
+    console.error('Profile photo storage upload failed:', error.name, error.Code, error.message);
+    return fail(res, 502, `Could not save profile photo: ${error.message}`);
   }
   const { error } = await db.from('employees').update({ profile_image: publicUrl }).eq('id', employeeId);
   if (error) {
