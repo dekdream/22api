@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
-import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import cors from 'cors';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -36,18 +36,32 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '1mb' }));
 app.set('trust proxy', true);
+app.get('/uploads/*', async (req, res) => {
+  const key = req.params[0];
+  if (!key || key.includes('..') || !s3Bucket) return fail(res, 400, 'Invalid file path');
+  try {
+    const object = await s3.send(new GetObjectCommand({ Bucket: s3Bucket, Key: key }));
+    if (object.ContentType) res.type(object.ContentType);
+    if (object.ContentLength) res.set('Content-Length', String(object.ContentLength));
+    object.Body.pipe(res);
+  } catch (error) {
+    console.error('Storage download failed:', error.name, error.Code, error.message);
+    return fail(res, 404, 'File not found');
+  }
+});
 
-function publicFileUrl(key) {
-  return `${s3Endpoint.replace(/\/$/, '')}/${encodeURIComponent(s3Bucket)}/${key.split('/').map(encodeURIComponent).join('/')}`;
+function publicFileUrl(req, key) {
+  const baseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, '') || `${req.protocol}://${req.get('host')}`;
+  return `${baseUrl}/uploads/${key.split('/').map(encodeURIComponent).join('/')}`;
 }
 
-async function saveUpload(folder, fileName, file) {
+async function saveUpload(req, folder, fileName, file) {
   if (!s3Bucket || !s3AccessKeyId || !s3SecretAccessKey) {
     throw new Error('S3 storage credentials are not configured');
   }
   const key = `${folder}/${fileName}`;
   await s3.send(new PutObjectCommand({ Bucket: s3Bucket, Key: key, Body: file.buffer, ContentType: file.mimetype || 'application/octet-stream' }));
-  return publicFileUrl(key);
+  return publicFileUrl(req, key);
 }
 
 // Resources used by the Flutter app. QR-attendance sessions are not part of
@@ -292,7 +306,7 @@ app.post('/v1/me/attendance/photo', upload.single('photo'), async (req, res) => 
   if (Number.isNaN(capturedAt.valueOf())) return fail(res, 400, 'capturedAt is invalid');
   let publicUrl;
   try {
-    publicUrl = await saveUpload('attendance-photos', `${req.actor.employee_id}/${capturedAt.valueOf()}-${randomUUID()}.${extension}`, req.file);
+    publicUrl = await saveUpload(req, 'attendance-photos', `${req.actor.employee_id}/${capturedAt.valueOf()}-${randomUUID()}.${extension}`, req.file);
   } catch (error) {
     console.error('Attendance photo storage upload failed:', error.name, error.Code, error.message);
     return fail(res, 502, `Could not save attendance photo: ${error.message}`);
@@ -313,7 +327,7 @@ async function saveProfilePhoto(req, res, employeeId) {
   if (!extension) return fail(res, 400, 'photo must be a JPEG, PNG, or WebP image');
   let publicUrl;
   try {
-    publicUrl = await saveUpload('profile', `${employeeId}/${Date.now()}-${randomUUID()}.${extension}`, photo);
+    publicUrl = await saveUpload(req, 'profile', `${employeeId}/${Date.now()}-${randomUUID()}.${extension}`, photo);
   } catch (error) {
     console.error('Profile photo storage upload failed:', error.name, error.Code, error.message);
     return fail(res, 502, `Could not save profile photo: ${error.message}`);

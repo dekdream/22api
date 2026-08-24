@@ -12,6 +12,15 @@ const pool = new Pool({
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
 });
 
+function normalizeMediaUrl(value) {
+  if (typeof value !== 'string' || !value.startsWith('http')) return value;
+  const endpoint = (process.env.S3_ENDPOINT || process.env.AWS_ENDPOINT_URL || process.env.AWS_S3_ENDPOINT || 'https://t3.storageapi.dev').replace(/\/$/, '');
+  const bucket = process.env.S3_BUCKET_NAME || process.env.S3_BUCKET || process.env.AWS_BUCKET_NAME || process.env.AWS_S3_BUCKET_NAME || process.env.AWS_S3_BUCKET || process.env.BUCKET_NAME;
+  const publicBase = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
+  const prefix = bucket ? `${endpoint}/${bucket}/` : '';
+  return publicBase && prefix && value.startsWith(prefix) ? `${publicBase}/uploads/${value.slice(prefix.length)}` : value;
+}
+
 function identifier(value) {
   if (!/^[a-z_][a-z0-9_]*(\.[a-z_][a-z0-9_]*)?$/i.test(value)) {
     throw new Error('Invalid database identifier');
@@ -32,7 +41,7 @@ function condition(column, operator, value, params) {
 }
 
 async function decorate(table, row) {
-  const result = { ...row };
+  const result = Object.fromEntries(Object.entries(row).map(([key, value]) => [key, key === 'profile_image' || key.endsWith('_photo_url') ? normalizeMediaUrl(value) : value]));
   const employeeId = row.employee_id;
   if (table === 'employees' || employeeId) {
     const id = table === 'employees' ? row.id : employeeId;
