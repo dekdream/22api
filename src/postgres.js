@@ -16,7 +16,7 @@ function normalizeMediaUrl(value) {
   if (typeof value !== 'string' || !value.startsWith('http')) return value;
   const endpoint = (process.env.S3_ENDPOINT || process.env.AWS_ENDPOINT_URL || process.env.AWS_S3_ENDPOINT || 'https://t3.storageapi.dev').replace(/\/$/, '');
   const bucket = process.env.S3_BUCKET_NAME || process.env.S3_BUCKET || process.env.AWS_BUCKET_NAME || process.env.AWS_S3_BUCKET_NAME || process.env.AWS_S3_BUCKET || process.env.BUCKET_NAME;
-  const publicBase = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
+  const publicBase = (process.env.PUBLIC_BASE_URL || 'https://22api-production.up.railway.app').replace(/\/$/, '');
   const prefix = bucket ? `${endpoint}/${bucket}/` : '';
   return publicBase && prefix && value.startsWith(prefix) ? `${publicBase}/uploads/${value.slice(prefix.length)}` : value;
 }
