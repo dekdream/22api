@@ -1,4 +1,7 @@
 import 'dotenv/config';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import cors from 'cors';
 import express from 'express';
 import jwt from 'jsonwebtoken';
@@ -9,6 +12,7 @@ const required = ['DATABASE_URL', 'API_JWT_SECRET'];
 for (const key of required) if (!process.env[key]) throw new Error(`Missing ${key} in .env`);
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
+const uploadDir = path.resolve(process.env.UPLOAD_DIR || './uploads');
 const businessTimeZone = process.env.BUSINESS_TIME_ZONE || 'Asia/Bangkok';
 const origins = (process.env.CLIENT_ORIGIN || '')
   .split(',')
@@ -27,6 +31,21 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 app.use(express.json({ limit: '1mb' }));
+app.set('trust proxy', true);
+app.use('/uploads', express.static(uploadDir, { maxAge: '1d' }));
+
+function publicFileUrl(req, relativePath) {
+  const baseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, '') || `${req.protocol}://${req.get('host')}`;
+  return `${baseUrl}/uploads/${relativePath.split(path.sep).join('/')}`;
+}
+
+async function saveUpload(req, folder, fileName, file) {
+  const relativePath = path.join(folder, fileName);
+  const absolutePath = path.join(uploadDir, relativePath);
+  await mkdir(path.dirname(absolutePath), { recursive: true });
+  await writeFile(absolutePath, file.buffer);
+  return publicFileUrl(req, relativePath);
+}
 
 // Resources used by the Flutter app. QR-attendance sessions are not part of
 // the current schema, but departments are and must remain available.
@@ -262,13 +281,13 @@ app.post('/v1/me/attendance/photo', upload.single('photo'), async (req, res) => 
   if (!extension) return fail(res, 400, 'photo must be a JPEG, PNG, or WebP image');
   const checkIn = req.body.checkIn === 'true'; const capturedAt = new Date(req.body.capturedAt);
   if (Number.isNaN(capturedAt.valueOf())) return fail(res, 400, 'capturedAt is invalid');
-  const path = `attendance/${req.actor.employee_id}/${capturedAt.valueOf()}.${extension}`;
-  const { error: uploadError } = await db.storage.from('attendance-photos').upload(path, req.file.buffer, { contentType: req.file.mimetype, upsert: false });
-  if (uploadError) {
-    console.error('Profile photo storage upload failed:', uploadError);
-    return fail(res, 400, uploadError.message);
+  let publicUrl;
+  try {
+    publicUrl = await saveUpload(req, 'attendance-photos', `${req.actor.employee_id}/${capturedAt.valueOf()}-${randomUUID()}.${extension}`, req.file);
+  } catch (error) {
+    console.error('Attendance photo storage upload failed:', error);
+    return fail(res, 500, 'Could not save attendance photo');
   }
-  const { data: { publicUrl } } = db.storage.from('attendance-photos').getPublicUrl(path);
   const workDate = businessDate(capturedAt);
   const { data: existing, error: findError } = await db.from('attendance').select().eq('employee_id', req.actor.employee_id).eq('work_date', workDate).maybeSingle();
   if (findError) return fail(res, 400, findError.message);
@@ -283,12 +302,13 @@ async function saveProfilePhoto(req, res, employeeId) {
   if (!photo) return fail(res, 400, 'photo is required');
   const extension = imageExtension(photo);
   if (!extension) return fail(res, 400, 'photo must be a JPEG, PNG, or WebP image');
-  const path = `employees/${employeeId}/${Date.now()}.${extension}`;
-  const { error: uploadError } = await db.storage.from('profile').upload(path, photo.buffer, {
-    contentType: photo.mimetype || 'image/jpeg', upsert: false,
-  });
-  if (uploadError) return fail(res, 400, uploadError.message);
-  const { data: { publicUrl } } = db.storage.from('profile').getPublicUrl(path);
+  let publicUrl;
+  try {
+    publicUrl = await saveUpload(req, 'profile', `${employeeId}/${Date.now()}-${randomUUID()}.${extension}`, photo);
+  } catch (error) {
+    console.error('Profile photo storage upload failed:', error);
+    return fail(res, 500, 'Could not save profile photo');
+  }
   const { error } = await db.from('employees').update({ profile_image: publicUrl }).eq('id', employeeId);
   if (error) {
     console.error('Profile photo database update failed:', error);
