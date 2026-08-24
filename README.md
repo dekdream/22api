@@ -24,6 +24,4 @@ on position) and QR-attendance sessions (photo attendance replaced them).
 
 `POST /v1/auth/login` retains the legacy username + employee-code login temporarily. It must be replaced with a real password login before exposing the API publicly.
 
-Railway PostgreSQL replaces Supabase Database. Photo files are kept separately on the Railway Volume.
-
-Photo files are stored on the Railway Volume mounted at `UPLOAD_DIR` (use `/app/data` when the volume is mounted there). Set `PUBLIC_BASE_URL` to the public API domain so saved photo URLs work in Flutter. The volume must be attached to the API service, not the PostgreSQL service.
+Railway PostgreSQL replaces Supabase Database. Photo files are uploaded to the `enclosed-cup` S3-compatible storage. Add its credentials to the `22api` service as `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET_NAME`, `S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY`.
