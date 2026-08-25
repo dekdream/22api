@@ -150,6 +150,13 @@ function guardTable(req, res, next) {
     return fail(res, 404, 'Unknown resource');
   }
 
+  // Employees may submit leave requests for themselves. Other table writes
+  // remain restricted to managers.
+  if (req.actor.role === 'employee' &&
+      req.method === 'POST' && req.params.table === 'leave_requests') {
+    return next();
+  }
+
   const isOwnerOrAdmin =
     req.actor.role === 'owner' || req.actor.role === 'admin';
 
@@ -228,6 +235,10 @@ async function requireRecordAccess(req, res, next) {
 }
 
 async function requirePayloadScope(req, res, next) {
+  if (req.actor.role === 'employee' && req.params.table === 'leave_requests' &&
+      req.body?.employee_id !== req.actor.employee_id) {
+    return fail(res, 403, 'Employees can submit leave only for themselves');
+  }
   if (req.actor.role === 'owner' || !employeeReferencedTables.has(req.params.table) || !req.body?.employee_id) return next();
   const { data, error } = await db.from('employees').select('id').eq('id', req.body.employee_id).eq('branch_id', req.actor.branch_id).maybeSingle();
   if (error) return fail(res, 400, error.message);
