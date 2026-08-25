@@ -1,99 +1,51 @@
 import 'dotenv/config';
-import { randomUUID } from 'node:crypto';
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import cors from 'cors';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
-import { db } from './postgres.js';
+import { createClient } from '@supabase/supabase-js';
 
-const required = ['DATABASE_URL', 'API_JWT_SECRET'];
+const required = ['SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY', 'API_JWT_SECRET'];
 for (const key of required) if (!process.env[key]) throw new Error(`Missing ${key} in .env`);
+
+const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
-const s3Endpoint = process.env.S3_ENDPOINT || process.env.AWS_ENDPOINT_URL || process.env.AWS_S3_ENDPOINT || 'https://t3.storageapi.dev';
-const s3Region = process.env.S3_REGION || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'auto';
-const s3Bucket = process.env.S3_BUCKET_NAME || process.env.S3_BUCKET || process.env.AWS_BUCKET_NAME || process.env.AWS_S3_BUCKET_NAME || process.env.AWS_S3_BUCKET || process.env.BUCKET_NAME;
-const s3AccessKeyId = process.env.S3_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
-const s3SecretAccessKey = process.env.S3_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
-const s3 = new S3Client({ endpoint: s3Endpoint, region: s3Region, forcePathStyle: true, credentials: { accessKeyId: s3AccessKeyId, secretAccessKey: s3SecretAccessKey } });
 const businessTimeZone = process.env.BUSINESS_TIME_ZONE || 'Asia/Bangkok';
-const origins = (process.env.CLIENT_ORIGIN || '')
-  .split(',')
-  .map((x) => x.trim())
-  .filter(Boolean);
-
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow non-browser requests and local Flutter Web development servers.
-    if (!origin || origin.startsWith('http://localhost:')) {
-      return callback(null, true);
-    }
-    return callback(null, origins.includes(origin));
-  },
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+const origins = (process.env.CLIENT_ORIGIN || '').split(',').map((x) => x.trim()).filter(Boolean);
+app.use(cors({ origin: origins.length ? origins : false }));
 app.use(express.json({ limit: '1mb' }));
-app.set('trust proxy', true);
-app.get('/uploads/*', async (req, res) => {
-  const key = req.params[0];
-  if (!key || key.includes('..') || !s3Bucket) return fail(res, 400, 'Invalid file path');
-  try {
-    const object = await s3.send(new GetObjectCommand({ Bucket: s3Bucket, Key: key }));
-    if (object.ContentType) res.type(object.ContentType);
-    if (object.ContentLength) res.set('Content-Length', String(object.ContentLength));
-    object.Body.pipe(res);
-  } catch (error) {
-    console.error('Storage download failed:', error.name, error.Code, error.message);
-    return fail(res, 404, 'File not found');
-  }
-});
 
-function publicFileUrl(req, key) {
-  const baseUrl = process.env.PUBLIC_BASE_URL?.replace(/\/$/, '') || `${req.protocol}://${req.get('host')}`;
-  return `${baseUrl}/uploads/${key.split('/').map(encodeURIComponent).join('/')}`;
-}
-
-async function saveUpload(req, folder, fileName, file) {
-  if (!s3Bucket || !s3AccessKeyId || !s3SecretAccessKey) {
-    throw new Error('S3 storage credentials are not configured');
-  }
-  const key = `${folder}/${fileName}`;
-  await s3.send(new PutObjectCommand({ Bucket: s3Bucket, Key: key, Body: file.buffer, ContentType: file.mimetype || 'application/octet-stream' }));
-  return publicFileUrl(req, key);
-}
-
-// Resources used by the Flutter app. QR-attendance sessions are not part of
-// the current schema, but departments are and must remain available.
+// These are the resources used by the current Flutter app.  `departments` and
+// QR-attendance sessions were retired from the schema, so they intentionally
+// are not exposed here.
 const tableAccess = new Set([
-  'branches', 'departments', 'positions', 'employees', 'customers', 'announcements',
+  'branches', 'positions', 'employees', 'customers', 'announcements',
   'payroll', 'attendance', 'services', 'service_history', 'calendar_events',
   'leave_requests', 'leave_type', 'notifications', 'commission',
   'queue_bookings',
 ]);
 const employeeSelect = '*, positions(name, salary), branches(branch_code, branch_name)';
 const tableSelect = {
-  positions: '*, departments(name)',
   employees: employeeSelect,
   customers: '*, branches(branch_code, branch_name)',
   payroll: '*, employees(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
   attendance: '*, employees(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
-  service_history: '*, services(name), employees!service_history_employee_id_fkey(first_name, last_name, employee_code, branch_id, branches(branch_name))',
-  // leave_requests also has reviewed_by -> employees, so disambiguate the
-  // employee relation used by employee_id.
-  leave_requests: '*, leave_type(name), employees!leave_requests_employee_id_fkey(employee_code, first_name, last_name, branch_id)',
-  commission: '*, employees!commission_employee_id_fkey(employee_code, first_name, last_name, branch_id)',
-  queue_bookings: '*, services(name), employees!queue_bookings_employee_id_fkey(first_name, last_name, employee_code), branches(branch_name)',
+  service_history: '*, services(name), employees(first_name, last_name, employee_code, branch_id, branches(branch_name))',
+  leave_requests: '*, leave_type(name), employees(employee_code, first_name, last_name, branch_id)',
+  commission: '*, employees(employee_code, first_name, last_name, branch_id)',
+  queue_bookings: '*, services(name), employees(first_name, last_name, employee_code), branches(branch_name)',
 };
 // PostgREST only filters the parent rows through an embedded relation when
 // the relation is marked `!inner`.
 const branchScopedTableSelect = {
   payroll: '*, employees!inner(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
   attendance: '*, employees!inner(employee_code, first_name, last_name, branch_id, branches(branch_code, branch_name))',
-  service_history: '*, services(name), employees!service_history_employee_id_fkey!inner(first_name, last_name, employee_code, branch_id, branches(branch_name))',
-  leave_requests: '*, leave_type(name), employees!leave_requests_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
-  commission: '*, employees!commission_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
+  service_history: '*, services(name), employees!inner(first_name, last_name, employee_code, branch_id, branches(branch_name))',
+  leave_requests: '*, leave_type(name), employees!inner(employee_code, first_name, last_name, branch_id)',
+  commission: '*, employees!inner(employee_code, first_name, last_name, branch_id)',
 };
 const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings']);
 const employeeBranchTables = new Set(['payroll', 'attendance', 'service_history', 'leave_requests', 'commission']);
@@ -116,13 +68,6 @@ function imageExtension(file) {
   if (file.mimetype === 'image/png') return 'png';
   if (file.mimetype === 'image/webp') return 'webp';
   if (file.mimetype === 'image/jpeg') return 'jpg';
-  // Flutter Web may send MultipartFile.fromBytes as application/octet-stream.
-  // Fall back to the uploaded filename in that case.
-  const extension = String(file.originalname || '').toLowerCase().split('.').pop();
-  if (extension === 'png') return 'png';
-  if (extension === 'webp') return 'webp';
-  if (extension === 'jpg' || extension === 'jpeg') return 'jpg';
-  if (file.mimetype === 'application/octet-stream') return 'jpg';
   return null;
 }
 function roleFor(employee) {
@@ -146,66 +91,14 @@ function scopedData(req, table, body) {
   return data;
 }
 function guardTable(req, res, next) {
-  if (!tableAccess.has(req.params.table)) {
-    return fail(res, 404, 'Unknown resource');
-  }
-
-  // Employees may submit leave requests for themselves. Other table writes
-  // remain restricted to managers.
-  if (req.actor.role === 'employee' &&
-      req.method === 'POST' && req.params.table === 'leave_requests') {
-    return next();
-  }
-
-  const isOwnerOrAdmin =
-    req.actor.role === 'owner' || req.actor.role === 'admin';
-
-  if (req.params.table === 'service_history' && !isOwnerOrAdmin) {
-    return fail(res, 403, 'Owner or admin access required');
-  }
-
-  if (!canManage(req.actor)) {
-    return fail(res, 403, 'Manager access required');
-  }
-
-  if (
-    req.actor.role !== 'owner' &&
-    req.params.table === 'branches'
-  ) {
-    return fail(res, 403, 'Only owner can manage branches');
-  }
-
+  if (!tableAccess.has(req.params.table)) return fail(res, 404, 'Unknown resource');
+  if (!canManage(req.actor)) return fail(res, 403, 'Manager access required');
+  if (req.actor.role !== 'owner' && req.params.table === 'branches') return fail(res, 403, 'Only owner can manage branches');
   return next();
-}
-
-function guardTableRead(req, res, next) {
-  if (!tableAccess.has(req.params.table)) {
-    return fail(res, 404, 'Unknown resource');
-  }
-  if (canManage(req.actor)) return next();
-
-  // Employees may read only data needed by their own portal. The query scope
-  // below limits employee-linked tables to the logged-in employee/branch.
-  const employeeReadable = new Set([
-    'employees', 'announcements', 'payroll', 'attendance',
-    'leave_requests', 'service_history', 'calendar_events', 'notifications',
-    'services', 'leave_type',
-  ]);
-  if (req.actor.role === 'employee' && employeeReadable.has(req.params.table)) {
-    return next();
-  }
-  return fail(res, 403, 'Access denied');
 }
 
 function applyBranchScope(query, actor, table) {
   if (actor.role === 'owner') return query;
-  if (actor.role === 'employee') {
-    if (employeeBranchTables.has(table)) return query.eq('employee_id', actor.employee_id);
-    if (table === 'employees') return query.eq('id', actor.employee_id);
-    if (directBranchTables.has(table)) return query.eq('branch_id', actor.branch_id);
-    if (table === 'notifications') return query.eq('employee_id', actor.employee_id);
-    return query;
-  }
   if (table === 'employees') return query.eq('branch_id', actor.branch_id);
   if (directBranchTables.has(table)) return query.eq('branch_id', actor.branch_id);
   if (employeeBranchTables.has(table)) return query.eq('employees.branch_id', actor.branch_id);
@@ -235,10 +128,6 @@ async function requireRecordAccess(req, res, next) {
 }
 
 async function requirePayloadScope(req, res, next) {
-  if (req.actor.role === 'employee' && req.params.table === 'leave_requests' &&
-      req.body?.employee_id !== req.actor.employee_id) {
-    return fail(res, 403, 'Employees can submit leave only for themselves');
-  }
   if (req.actor.role === 'owner' || !employeeReferencedTables.has(req.params.table) || !req.body?.employee_id) return next();
   const { data, error } = await db.from('employees').select('id').eq('id', req.body.employee_id).eq('branch_id', req.actor.branch_id).maybeSingle();
   if (error) return fail(res, 400, error.message);
@@ -247,15 +136,9 @@ async function requirePayloadScope(req, res, next) {
 }
 
 app.get('/health', (_, res) => res.json({ ok: true }));
-app.get('/health/storage', (_, res) => res.json({
-  ok: Boolean(s3Bucket && s3AccessKeyId && s3SecretAccessKey),
-  provider: 's3-compatible',
-  endpoint: s3Endpoint,
-  bucketConfigured: Boolean(s3Bucket),
-  credentialsConfigured: Boolean(s3AccessKeyId && s3SecretAccessKey),
-}));
 
-// This preserves the app's current username + employee-code login flow. Employee codes are not passwords.
+// This preserves the app's current username + employee-code login flow. Before public launch,
+// replace it with a password or Supabase Auth; employee codes are not passwords.
 app.post('/v1/auth/login', async (req, res) => {
   const { username, employeeCode } = req.body ?? {};
   if (!username || !employeeCode) return fail(res, 400, 'username and employeeCode are required');
@@ -270,29 +153,11 @@ app.post('/v1/auth/login', async (req, res) => {
 
 app.use('/v1', authorize);
 
-app.get('/v1/tables/:table', guardTableRead, async (req, res) => {
+app.get('/v1/tables/:table', guardTable, async (req, res) => {
   const { table } = req.params;
-  // Older employee day-off rows may have employee_id but no branch_id.
-  // Backfill that scope before applying branch filtering so they remain
-  // visible in the calendar for the employee's branch.
-  if (table === 'calendar_events') {
-    const { error: backfillError } = await db.pool.query(
-      `UPDATE calendar_events AS events
-       SET branch_id = employees.branch_id
-       FROM employees
-       WHERE events.employee_id = employees.id
-         AND events.branch_id IS NULL`,
-    );
-    if (backfillError) return fail(res, 400, backfillError.message);
-  }
-  const { orderBy = 'id', branchId, workDate, workDateFrom, workDateTo } = req.query;
+  const { orderBy = 'id', branchId } = req.query;
   let query = db.from(table).select(selectFor(req.actor, table));
   query = applyBranchScope(query, req.actor, table);
-  if (table === 'attendance') {
-    if (workDate) query = query.eq('work_date', workDate);
-    if (workDateFrom) query = query.gte('work_date', workDateFrom);
-    if (workDateTo) query = query.lte('work_date', workDateTo);
-  }
   // Only the owner can choose a branch other than their own scope.
   if (branchId && req.actor.role === 'owner') {
     if (table === 'branches') query = query.eq('id', branchId);
@@ -328,17 +193,11 @@ app.post('/v1/me/attendance/photo', upload.single('photo'), async (req, res) => 
   if (!extension) return fail(res, 400, 'photo must be a JPEG, PNG, or WebP image');
   const checkIn = req.body.checkIn === 'true'; const capturedAt = new Date(req.body.capturedAt);
   if (Number.isNaN(capturedAt.valueOf())) return fail(res, 400, 'capturedAt is invalid');
-  let publicUrl;
-  try {
-    publicUrl = await saveUpload(req, 'attendance-photos', `${req.actor.employee_id}/${capturedAt.valueOf()}-${randomUUID()}.${extension}`, req.file);
-  } catch (error) {
-    console.error('Attendance photo storage upload failed:', error.name, error.Code, error.message);
-    return fail(res, 502, `Could not save attendance photo: ${error.message}`);
-  }
-  const requestedWorkDate = String(req.body.workDate || '').trim();
-  const workDate = /^\d{4}-\d{2}-\d{2}$/.test(requestedWorkDate)
-    ? requestedWorkDate
-    : businessDate(capturedAt);
+  const path = `attendance/${req.actor.employee_id}/${capturedAt.valueOf()}.${extension}`;
+  const { error: uploadError } = await db.storage.from('attendance-photos').upload(path, req.file.buffer, { contentType: req.file.mimetype, upsert: false });
+  if (uploadError) return fail(res, 400, uploadError.message);
+  const { data: { publicUrl } } = db.storage.from('attendance-photos').getPublicUrl(path);
+  const workDate = businessDate(capturedAt);
   const { data: existing, error: findError } = await db.from('attendance').select().eq('employee_id', req.actor.employee_id).eq('work_date', workDate).maybeSingle();
   if (findError) return fail(res, 400, findError.message);
   const values = checkIn ? { check_in: capturedAt.toISOString(), check_in_photo_url: publicUrl, status: 'Present' } : { check_out: capturedAt.toISOString(), check_out_photo_url: publicUrl };
@@ -347,34 +206,19 @@ app.post('/v1/me/attendance/photo', upload.single('photo'), async (req, res) => 
   if (result.error) return fail(res, 400, result.error.message); return res.status(204).end();
 });
 
-async function saveProfilePhoto(req, res, employeeId) {
-  const photo = req.file ?? (Array.isArray(req.files) ? req.files[0] : null);
-  if (!photo) return fail(res, 400, 'photo is required');
-  const extension = imageExtension(photo);
+app.post('/v1/me/profile-photo', upload.single('photo'), async (req, res) => {
+  if (!req.file) return fail(res, 400, 'photo is required');
+  const extension = imageExtension(req.file);
   if (!extension) return fail(res, 400, 'photo must be a JPEG, PNG, or WebP image');
-  let publicUrl;
-  try {
-    publicUrl = await saveUpload(req, 'profile', `${employeeId}/${Date.now()}-${randomUUID()}.${extension}`, photo);
-  } catch (error) {
-    console.error('Profile photo storage upload failed:', error.name, error.Code, error.message);
-    return fail(res, 502, `Could not save profile photo: ${error.message}`);
-  }
-  const { error } = await db.from('employees').update({ profile_image: publicUrl }).eq('id', employeeId);
-  if (error) {
-    console.error('Profile photo database update failed:', error);
-    return fail(res, 400, error.message);
-  }
+  const path = `employees/${req.actor.employee_id}/${Date.now()}.${extension}`;
+  const { error: uploadError } = await db.storage.from('profile').upload(path, req.file.buffer, {
+    contentType: req.file.mimetype, upsert: false,
+  });
+  if (uploadError) return fail(res, 400, uploadError.message);
+  const { data: { publicUrl } } = db.storage.from('profile').getPublicUrl(path);
+  const { error } = await db.from('employees').update({ profile_image: publicUrl }).eq('id', req.actor.employee_id);
+  if (error) return fail(res, 400, error.message);
   return res.json({ profile_image: publicUrl });
-}
-
-// Employees may update their own profile photo.
-app.post('/v1/me/profile-photo', upload.any(), async (req, res) =>
-  saveProfilePhoto(req, res, req.actor.employee_id));
-
-// Owner/admin may update a selected employee's profile photo from management.
-app.post('/v1/employees/:id/profile-photo', upload.any(), async (req, res) => {
-  if (!canManage(req.actor)) return fail(res, 403, 'Manager access required');
-  return saveProfilePhoto(req, res, req.params.id);
 });
 
 app.use((err, _, res, __) => { console.error(err); return fail(res, 500, 'Internal server error'); });
