@@ -272,6 +272,19 @@ app.use('/v1', authorize);
 
 app.get('/v1/tables/:table', guardTableRead, async (req, res) => {
   const { table } = req.params;
+  // Older employee day-off rows may have employee_id but no branch_id.
+  // Backfill that scope before applying branch filtering so they remain
+  // visible in the calendar for the employee's branch.
+  if (table === 'calendar_events') {
+    const { error: backfillError } = await db.pool.query(
+      `UPDATE calendar_events AS events
+       SET branch_id = employees.branch_id
+       FROM employees
+       WHERE events.employee_id = employees.id
+         AND events.branch_id IS NULL`,
+    );
+    if (backfillError) return fail(res, 400, backfillError.message);
+  }
   const { orderBy = 'id', branchId, workDate, workDateFrom, workDateTo } = req.query;
   let query = db.from(table).select(selectFor(req.actor, table));
   query = applyBranchScope(query, req.actor, table);
