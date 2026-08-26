@@ -341,7 +341,10 @@ app.post('/v1/me/attendance/photo', upload.single('photo'), async (req, res) => 
     : businessDate(capturedAt);
   const { data: existing, error: findError } = await db.from('attendance').select().eq('employee_id', req.actor.employee_id).eq('work_date', workDate).maybeSingle();
   if (findError) return fail(res, 400, findError.message);
-  const values = checkIn ? { check_in: capturedAt.toISOString(), check_in_photo_url: publicUrl, status: 'Present' } : { check_out: capturedAt.toISOString(), check_out_photo_url: publicUrl };
+  // Keep the submitted wall-clock value because attendance uses PostgreSQL
+  // `timestamp without time zone`. Converting to UTC would shift it by 7 hours.
+  const capturedWallTime = String(req.body.capturedAt);
+  const values = checkIn ? { check_in: capturedWallTime, check_in_photo_url: publicUrl, status: 'Present' } : { check_out: capturedWallTime, check_out_photo_url: publicUrl };
   if (!existing && !checkIn) return fail(res, 400, 'Check in before checking out');
   const result = existing ? await db.from('attendance').update(values).eq('id', existing.id) : await db.from('attendance').insert({ ...values, employee_id: req.actor.employee_id, work_date: workDate });
   if (result.error) return fail(res, 400, result.error.message); return res.status(204).end();
