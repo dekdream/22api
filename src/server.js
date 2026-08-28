@@ -70,7 +70,7 @@ const tableAccess = new Set([
   'branches', 'departments', 'positions', 'employees', 'customers', 'announcements',
   'payroll', 'attendance', 'services', 'service_history', 'calendar_events',
   'leave_requests', 'leave_type', 'notifications', 'commission',
-  'queue_bookings','queue_bookings', 'branch_transactions',
+  'queue_bookings','queue_bookings', 'branch_transactions'
 ]);
 const employeeSelect = '*, positions(name, salary), branches(branch_code, branch_name)';
 const tableSelect = {
@@ -95,7 +95,7 @@ const branchScopedTableSelect = {
   leave_requests: '*, leave_type(name), employees!leave_requests_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
   commission: '*, employees!commission_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
 };
-const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings','branch_transactions',]);
+const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings','branch_transactions']);
 const employeeBranchTables = new Set(['payroll', 'attendance', 'service_history', 'leave_requests', 'commission']);
 const employeeReferencedTables = new Set([...employeeBranchTables, 'notifications']);
 
