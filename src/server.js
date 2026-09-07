@@ -140,6 +140,11 @@ function authorize(req, res, next) {
 function canManage(actor) { return actor.role === 'owner' || actor.role === 'branchOwner' || actor.role === 'admin'; }
 function scopedData(req, table, body) {
   const data = { ...body };
+  if (req.actor.role === 'employee' && table === 'calendar_events') {
+    data.employee_id = req.actor.employee_id;
+    data.branch_id = req.actor.branch_id;
+    data.event_type = 'DayOff';
+  }
   if (req.actor.role === 'branchOwner' || req.actor.role === 'admin') {
     if (table === 'employees' || directBranchTables.has(table)) data.branch_id = req.actor.branch_id;
   }
