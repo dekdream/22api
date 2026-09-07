@@ -70,7 +70,7 @@ const tableAccess = new Set([
   'branches', 'departments', 'positions', 'employees', 'customers', 'announcements',
   'payroll', 'attendance', 'services', 'service_history', 'calendar_events',
   'leave_requests', 'leave_type', 'notifications', 'commission',
-  'queue_bookings','queue_bookings', 'branch_transactions'
+  'queue_bookings',
 ]);
 const employeeSelect = '*, positions(name, salary), branches(branch_code, branch_name)';
 const tableSelect = {
@@ -95,7 +95,7 @@ const branchScopedTableSelect = {
   leave_requests: '*, leave_type(name), employees!leave_requests_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
   commission: '*, employees!commission_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
 };
-const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings','branch_transactions']);
+const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings']);
 const employeeBranchTables = new Set(['payroll', 'attendance', 'service_history', 'leave_requests', 'commission']);
 const employeeReferencedTables = new Set([...employeeBranchTables, 'notifications']);
 
@@ -155,10 +155,19 @@ function guardTable(req, res, next) {
     return fail(res, 404, 'Unknown resource');
   }
 
-  // Employees may submit leave requests for themselves. Other table writes
-  // remain restricted to managers.
+  // Employees may submit leave requests and manage only their own day-off
+  // calendar rows. Payload and record scope are enforced below.
   if (req.actor.role === 'employee' &&
       req.method === 'POST' && req.params.table === 'leave_requests') {
+    return next();
+  }
+  if (req.actor.role === 'employee' &&
+      req.params.table === 'calendar_events' &&
+      ['POST', 'PATCH', 'DELETE'].includes(req.method)) {
+    if (req.method !== 'DELETE' &&
+        req.body?.event_type && req.body.event_type !== 'DayOff') {
+      return fail(res, 403, 'Employees can manage only their own day off');
+    }
     return next();
   }
 
@@ -222,6 +231,9 @@ async function canAccessRecord(actor, table, id) {
   if (actor.role === 'owner') return true;
   if (table === 'branches' || table === 'positions' || table === 'services' || table === 'leave_type') return false;
   let query = db.from(table).select(selectFor(actor, table)).eq('id', id);
+  if (actor.role === 'employee' && table === 'calendar_events') {
+    query = query.eq('employee_id', actor.employee_id);
+  }
   query = applyBranchScope(query, actor, table);
   const { data, error } = await query.maybeSingle();
   if (error) throw error;
@@ -243,6 +255,10 @@ async function requirePayloadScope(req, res, next) {
   if (req.actor.role === 'employee' && req.params.table === 'leave_requests' &&
       req.body?.employee_id !== req.actor.employee_id) {
     return fail(res, 403, 'Employees can submit leave only for themselves');
+  }
+  if (req.actor.role === 'employee' && req.params.table === 'calendar_events' &&
+      req.body?.employee_id && req.body.employee_id !== req.actor.employee_id) {
+    return fail(res, 403, 'Employees can manage only their own day off');
   }
   if (req.actor.role === 'owner' || !employeeReferencedTables.has(req.params.table) || !req.body?.employee_id) return next();
   const { data, error } = await db.from('employees').select('id').eq('id', req.body.employee_id).eq('branch_id', req.actor.branch_id).maybeSingle();
