@@ -4,7 +4,8 @@ const { Pool } = pg;
 const tableNames = new Set([
   'branches', 'departments', 'positions', 'employees', 'customers', 'announcements',
   'payroll', 'attendance', 'services', 'service_history', 'calendar_events',
-  'leave_requests', 'leave_type', 'notifications', 'commission', 'queue_bookings','branch_transactions',
+  'leave_requests', 'leave_type', 'notifications', 'commission', 'queue_bookings',
+  'purchase_requests', 'purchase_request_items', 'purchase_request_history',
 ]);
 
 const pool = new Pool({
@@ -66,7 +67,7 @@ async function decorate(table, row) {
     const department = await pool.query('SELECT name FROM departments WHERE id = $1', [row.department_id]);
     if (department.rows[0]) result.departments = department.rows[0];
   }
-  if (table === 'customers' || table === 'queue_bookings') {
+  if (table === 'customers' || table === 'queue_bookings' || table === 'purchase_requests') {
     const branchId = row.branch_id;
     if (branchId) {
       const branch = await pool.query('SELECT branch_code, branch_name FROM branches WHERE id = $1', [branchId]);
