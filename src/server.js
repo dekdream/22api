@@ -71,6 +71,7 @@ const tableAccess = new Set([
   'payroll', 'attendance', 'services', 'service_history', 'calendar_events',
   'leave_requests', 'leave_type', 'notifications', 'commission',
   'queue_bookings',
+  'purchase_requests', 'purchase_request_items', 'purchase_request_history',
 ]);
 const employeeSelect = '*, positions(name, salary), branches(branch_code, branch_name)';
 const tableSelect = {
@@ -95,7 +96,7 @@ const branchScopedTableSelect = {
   leave_requests: '*, leave_type(name), employees!leave_requests_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
   commission: '*, employees!commission_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
 };
-const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings']);
+const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings', 'purchase_requests']);
 const employeeBranchTables = new Set(['payroll', 'attendance', 'service_history', 'leave_requests', 'commission']);
 const employeeReferencedTables = new Set([...employeeBranchTables, 'notifications']);
 
@@ -129,6 +130,8 @@ function roleFor(employee) {
   const name = String(employee.positions?.name ?? '').toLowerCase();
   if (name === 'owner') return employee.branch_id ? 'branchOwner' : 'owner';
   if (name === 'administrator' || name === 'admin') return 'admin';
+  if (name === 'manager' || name === 'ผู้จัดการ') return 'manager';
+  if (name === 'purchasing' || name === 'จัดซื้อ' || name === 'ฝ่ายจัดซื้อ') return 'purchasing';
   return 'employee';
 }
 function authorize(req, res, next) {
@@ -137,7 +140,7 @@ function authorize(req, res, next) {
   try { req.actor = jwt.verify(token, process.env.API_JWT_SECRET); return next(); }
   catch { return fail(res, 401, 'Invalid or expired token'); }
 }
-function canManage(actor) { return actor.role === 'owner' || actor.role === 'branchOwner' || actor.role === 'admin'; }
+function canManage(actor) { return ['owner', 'branchOwner', 'manager', 'purchasing', 'admin'].includes(actor.role); }
 function scopedData(req, table, body) {
   const data = { ...body };
   if (req.actor.role === 'employee' && table === 'calendar_events') {
@@ -160,6 +163,13 @@ function guardTable(req, res, next) {
   if (req.actor.role === 'employee' &&
       req.method === 'POST' && req.params.table === 'leave_requests') {
     return next();
+  }
+  if (req.actor.role === 'purchasing') {
+    return fail(res, 403, 'Purchasing access is limited to purchase requests');
+  }
+  // Purchase request writes use the workflow endpoints below only.
+  if (req.params.table.startsWith('purchase_request')) {
+    return fail(res, 403, 'Use the purchase request workflow');
   }
   if (req.actor.role === 'employee' &&
       req.params.table === 'calendar_events' &&
@@ -196,6 +206,9 @@ function guardTableRead(req, res, next) {
   if (!tableAccess.has(req.params.table)) {
     return fail(res, 404, 'Unknown resource');
   }
+  if (req.actor.role === 'purchasing' && req.params.table !== 'purchase_requests') {
+    return fail(res, 403, 'Purchasing access is limited to purchase requests');
+  }
   if (canManage(req.actor)) return next();
 
   // Employees may read only data needed by their own portal. The query scope
@@ -204,6 +217,7 @@ function guardTableRead(req, res, next) {
     'employees', 'announcements', 'payroll', 'attendance',
     'leave_requests', 'service_history', 'calendar_events', 'notifications',
     'services', 'leave_type',
+    'purchase_requests',
   ]);
   if (req.actor.role === 'employee' && employeeReadable.has(req.params.table)) {
     return next();
@@ -214,6 +228,7 @@ function guardTableRead(req, res, next) {
 function applyBranchScope(query, actor, table) {
   if (actor.role === 'owner') return query;
   if (actor.role === 'employee') {
+    if (table === 'purchase_requests') return query.eq('requester_id', actor.employee_id);
     if (employeeBranchTables.has(table)) return query.eq('employee_id', actor.employee_id);
     if (table === 'employees') return query.eq('id', actor.employee_id);
     if (directBranchTables.has(table)) return query.eq('branch_id', actor.branch_id);
@@ -225,6 +240,47 @@ function applyBranchScope(query, actor, table) {
   if (employeeBranchTables.has(table)) return query.eq('employees.branch_id', actor.branch_id);
   if (table === 'notifications') return query.eq('employee_id', actor.employee_id);
   return query;
+}
+
+function canSeePurchaseRequest(actor, row) {
+  if (actor.role === 'owner') return true;
+  if (actor.role === 'employee') return row.requester_id === actor.employee_id;
+  return String(row.branch_id) === String(actor.branch_id);
+}
+
+async function loadPurchaseRequest(id) {
+  const { data, error } = await db.from('purchase_requests').select().eq('id', id).maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+async function addPrHistory(id, actor, fromStatus, toStatus, action, note) {
+  const { error } = await db.from('purchase_request_history').insert({
+    purchase_request_id: id, actor_id: actor.employee_id, from_status: fromStatus,
+    to_status: toStatus, action, note: note || null,
+  });
+  if (error) throw error;
+}
+
+async function notifyPrApprovers(pr) {
+  try {
+    await db.pool.query(
+      `INSERT INTO notifications (employee_id, title, message, notification_type)
+       SELECT e.id, 'มีใบขอซื้อรออนุมัติ', $1, 'PurchaseRequest'
+       FROM employees e LEFT JOIN positions p ON p.id=e.position_id
+       WHERE lower(coalesce(p.name,'')) IN ('owner','administrator','admin','manager','ผู้จัดการ')
+         AND (e.branch_id IS NULL OR e.branch_id=$2)`,
+      [`${pr.request_no} รอการตรวจสอบ`, pr.branch_id]);
+  } catch (error) { console.error('PR approver notification failed:', error.message); }
+}
+
+async function notifyPrRequester(pr, status, note) {
+  try {
+    await db.pool.query(
+      `INSERT INTO notifications (employee_id, title, message, notification_type)
+       VALUES ($1, 'อัปเดตสถานะใบขอซื้อ', $2, 'PurchaseRequest')`,
+      [pr.requester_id, `${pr.request_no}: ${status}${note ? ` - ${note}` : ''}`]);
+  } catch (error) { console.error('PR requester notification failed:', error.message); }
 }
 
 async function canAccessRecord(actor, table, id) {
@@ -290,6 +346,152 @@ app.post('/v1/auth/login', async (req, res) => {
 });
 
 app.use('/v1', authorize);
+
+app.post('/v1/purchase-requests/attachment', upload.single('photo'), async (req, res) => {
+  if (!req.file) return fail(res, 400, 'attachment is required');
+  const extension = imageExtension(req.file);
+  if (!extension) return fail(res, 400, 'attachment must be a JPEG, PNG, or WebP image');
+  try {
+    const url = await saveUpload(req, 'purchase-request-attachments',
+      `${req.actor.employee_id}/${Date.now()}-${randomUUID()}.${extension}`, req.file);
+    return res.status(201).json({ url });
+  } catch (error) { return fail(res, 502, `Could not save attachment: ${error.message}`); }
+});
+
+app.post('/v1/purchase-requests', async (req, res) => {
+  const request = req.body?.request ?? {};
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) return fail(res, 400, 'At least one item is required');
+  const status = request.status === 'Pending Approval' ? 'Pending Approval' : 'Draft';
+  const branchId = req.actor.role === 'owner' ? request.branch_id : req.actor.branch_id;
+  if (!branchId) return fail(res, 400, 'branch_id is required');
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await client.query(
+      `INSERT INTO purchase_requests
+       (request_no, requester_id, branch_id, request_date, needed_date, category,
+        supplier, product_link, reason, attachment_url, estimated_total, status)
+       VALUES ('PR-' || to_char(now(), 'YYYYMMDD') || '-' || lpad(nextval('purchase_request_number_seq')::text, 4, '0'),
+        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [req.actor.employee_id, branchId, request.request_date, request.needed_date,
+       request.category, request.supplier || null, request.product_link || null,
+       request.reason, request.attachment_url || null,
+       items.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.estimated_unit_price || 0), 0), status],
+    );
+    const pr = result.rows[0];
+    for (const item of items) {
+      await client.query(
+        `INSERT INTO purchase_request_items
+         (purchase_request_id, item_name, detail, quantity, unit, estimated_unit_price)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [pr.id, item.item_name, item.detail || null, item.quantity, item.unit, item.estimated_unit_price || 0],
+      );
+    }
+    await client.query(
+      `INSERT INTO purchase_request_history
+       (purchase_request_id, actor_id, to_status, action) VALUES ($1,$2,$3,$4)`,
+      [pr.id, req.actor.employee_id, status, status === 'Draft' ? 'Save Draft' : 'Submit'],
+    );
+    await client.query('COMMIT');
+    if (status === 'Pending Approval') await notifyPrApprovers(pr);
+    return res.status(201).json(pr);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    return fail(res, 400, error.message);
+  } finally { client.release(); }
+});
+
+app.get('/v1/purchase-requests/:id/items', async (req, res) => {
+  try {
+    const row = await loadPurchaseRequest(req.params.id);
+    if (!row || !canSeePurchaseRequest(req.actor, row)) return fail(res, 404, 'Purchase request not found');
+    const result = await db.pool.query(
+      'SELECT * FROM purchase_request_items WHERE purchase_request_id = $1 ORDER BY id', [req.params.id]);
+    return res.json(result.rows);
+  } catch (error) { return fail(res, 400, error.message); }
+});
+
+app.get('/v1/purchase-requests/:id/history', async (req, res) => {
+  try {
+    const row = await loadPurchaseRequest(req.params.id);
+    if (!row || !canSeePurchaseRequest(req.actor, row)) return fail(res, 404, 'Purchase request not found');
+    const result = await db.pool.query(
+      `SELECT h.*, trim(coalesce(e.first_name,'') || ' ' || coalesce(e.last_name,'')) actor_name
+       FROM purchase_request_history h LEFT JOIN employees e ON e.id=h.actor_id
+       WHERE h.purchase_request_id=$1 ORDER BY h.created_at`, [req.params.id]);
+    return res.json(result.rows);
+  } catch (error) { return fail(res, 400, error.message); }
+});
+
+app.patch('/v1/purchase-requests/:id', async (req, res) => {
+  const client = await db.pool.connect();
+  try {
+    const row = await loadPurchaseRequest(req.params.id);
+    if (!row || row.requester_id !== req.actor.employee_id || !['Draft', 'Send Back'].includes(row.status)) {
+      return fail(res, 403, 'Only the requester can edit a draft or returned request');
+    }
+    const request = req.body?.request ?? {};
+    const items = req.body?.items;
+    await client.query('BEGIN');
+    const allowed = ['request_date', 'needed_date', 'category', 'supplier', 'product_link', 'reason', 'attachment_url'];
+    for (const key of allowed) if (Object.hasOwn(request, key)) {
+      await client.query(`UPDATE purchase_requests SET ${key} = $1, updated_at = now() WHERE id = $2`, [request[key], row.id]);
+    }
+    if (Array.isArray(items)) {
+      if (!items.length) throw new Error('At least one item is required');
+      await client.query('DELETE FROM purchase_request_items WHERE purchase_request_id = $1', [row.id]);
+      let total = 0;
+      for (const item of items) {
+        total += Number(item.quantity || 0) * Number(item.estimated_unit_price || 0);
+        await client.query(`INSERT INTO purchase_request_items
+          (purchase_request_id,item_name,detail,quantity,unit,estimated_unit_price)
+          VALUES ($1,$2,$3,$4,$5,$6)`, [row.id,item.item_name,item.detail || null,item.quantity,item.unit,item.estimated_unit_price || 0]);
+      }
+      await client.query('UPDATE purchase_requests SET estimated_total=$1 WHERE id=$2', [total,row.id]);
+    }
+    await client.query('COMMIT');
+    return res.status(204).end();
+  } catch (error) { await client.query('ROLLBACK'); return fail(res, 400, error.message); }
+  finally { client.release(); }
+});
+
+app.post('/v1/purchase-requests/:id/action', async (req, res) => {
+  const transitions = {
+    submit: ['Draft,Send Back', 'Pending Approval'], approve: ['Pending Approval', 'Approved'],
+    reject: ['Pending Approval', 'Rejected'], send_back: ['Pending Approval', 'Send Back'],
+    purchasing: ['Approved', 'Purchasing'], received: ['Purchasing', 'Received'],
+    complete: ['Received', 'Completed'],
+  };
+  try {
+    const row = await loadPurchaseRequest(req.params.id);
+    if (!row || !canSeePurchaseRequest(req.actor, row)) return fail(res, 404, 'Purchase request not found');
+    const action = String(req.body?.action || '');
+    const transition = transitions[action];
+    if (!transition || !transition[0].split(',').includes(row.status)) return fail(res, 400, 'Invalid status transition');
+    const isRequester = row.requester_id === req.actor.employee_id;
+    const isApprover = ['owner', 'admin', 'branchOwner', 'manager'].includes(req.actor.role);
+    const isBuyer = ['owner', 'admin', 'purchasing'].includes(req.actor.role);
+    if (action === 'submit' && !isRequester) return fail(res, 403, 'Requester access required');
+    if (['approve','reject','send_back'].includes(action) && !isApprover) return fail(res, 403, 'Approver access required');
+    if (['purchasing','received'].includes(action) && !isBuyer) return fail(res, 403, 'Purchasing access required');
+    if (action === 'complete' && !(isRequester || isBuyer)) return fail(res, 403, 'Receiver access required');
+    const values = { status: transition[1], updated_at: new Date().toISOString() };
+    if (action === 'approve') { values.approved_by = req.actor.employee_id; values.approved_at = new Date().toISOString(); }
+    if (action === 'purchasing') {
+      values.actual_total = Number(req.body.actual_total || 0);
+      values.actual_supplier = req.body.actual_supplier || null;
+    }
+    if (action === 'received') values.received_at = new Date().toISOString();
+    if (action === 'complete') values.completed_at = new Date().toISOString();
+    const { error } = await db.from('purchase_requests').update(values).eq('id', row.id);
+    if (error) throw error;
+    await addPrHistory(row.id, req.actor, row.status, transition[1], action, req.body?.note);
+    if (action === 'submit') await notifyPrApprovers(row);
+    else await notifyPrRequester(row, transition[1], req.body?.note);
+    return res.status(204).end();
+  } catch (error) { return fail(res, 400, error.message); }
+});
 
 app.get('/v1/tables/:table', guardTableRead, async (req, res) => {
   const { table } = req.params;
