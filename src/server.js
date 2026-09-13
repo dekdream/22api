@@ -456,6 +456,21 @@ app.patch('/v1/purchase-requests/:id', async (req, res) => {
   finally { client.release(); }
 });
 
+app.delete('/v1/purchase-requests/:id', async (req, res) => {
+  try {
+    const row = await loadPurchaseRequest(req.params.id);
+    if (!row || row.requester_id !== req.actor.employee_id ||
+        !['Draft', 'Send Back'].includes(row.status)) {
+      return fail(res, 403, 'Only the requester can delete a draft or returned request');
+    }
+    const { error } = await db.from('purchase_requests').delete().eq('id', row.id);
+    if (error) return fail(res, 400, error.message);
+    return res.status(204).end();
+  } catch (error) {
+    return fail(res, 400, error.message);
+  }
+});
+
 app.post('/v1/purchase-requests/:id/action', async (req, res) => {
   const transitions = {
     submit: ['Draft,Send Back', 'Pending Approval'], approve: ['Pending Approval', 'Approved'],
