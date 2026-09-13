@@ -341,11 +341,22 @@ app.post('/v1/auth/login', async (req, res) => {
   if (error) return fail(res, 500, error.message);
   if (!employee) return fail(res, 401, 'Invalid credentials');
   const role = roleFor(employee);
-  const token = jwt.sign({ employee_id: employee.id, branch_id: employee.branch_id, role }, process.env.API_JWT_SECRET, { expiresIn: '8h' });
+  const token = jwt.sign({ employee_id: employee.id, branch_id: employee.branch_id, role }, process.env.API_JWT_SECRET, { expiresIn: '30d' });
   return res.json({ employee, token });
 });
 
 app.use('/v1', authorize);
+
+app.get('/v1/auth/session', async (req, res) => {
+  const { data: employee, error } = await db.from('employees')
+    .select(employeeSelect)
+    .eq('id', req.actor.employee_id)
+    .eq('status', 'Active')
+    .maybeSingle();
+  if (error) return fail(res, 500, error.message);
+  if (!employee) return fail(res, 401, 'Session is no longer valid');
+  return res.json(employee);
+});
 
 app.post('/v1/purchase-requests/attachment', upload.single('photo'), async (req, res) => {
   if (!req.file) return fail(res, 400, 'attachment is required');
