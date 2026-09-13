@@ -522,6 +522,45 @@ app.post('/v1/purchase-requests/:id/action', async (req, res) => {
 
 app.get('/v1/tables/:table', guardTableRead, async (req, res) => {
   const { table } = req.params;
+  const { orderBy = 'id', branchId, workDate, workDateFrom, workDateTo } = req.query;
+
+  // Purchase requests need the requester contact on every client. Use an
+  // explicit SQL join here instead of relying on PostgREST relation naming.
+  if (table === 'purchase_requests') {
+    const values = [];
+    const where = [];
+    if (req.actor.role === 'employee') {
+      values.push(req.actor.employee_id);
+      where.push(`pr.requester_id = $${values.length}`);
+    } else if (req.actor.role !== 'owner') {
+      values.push(req.actor.branch_id);
+      where.push(`pr.branch_id = $${values.length}`);
+    } else if (branchId) {
+      values.push(branchId);
+      where.push(`pr.branch_id = $${values.length}`);
+    }
+    const allowedOrder = new Set(['id', 'created_at', 'request_date', 'needed_date']);
+    const safeOrder = allowedOrder.has(orderBy) ? orderBy : 'created_at';
+    try {
+      const result = await db.pool.query(
+        `SELECT pr.*,
+                json_build_object(
+                  'first_name', e.first_name,
+                  'last_name', e.last_name,
+                  'phone', e.phone
+                ) AS requester
+         FROM purchase_requests pr
+         LEFT JOIN employees e ON e.id = pr.requester_id
+         ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+         ORDER BY pr.${safeOrder}`,
+        values,
+      );
+      return res.json(result.rows);
+    } catch (error) {
+      return fail(res, 400, error.message);
+    }
+  }
+
   // Older employee day-off rows may have employee_id but no branch_id.
   // Backfill that scope before applying branch filtering so they remain
   // visible in the calendar for the employee's branch.
@@ -535,7 +574,6 @@ app.get('/v1/tables/:table', guardTableRead, async (req, res) => {
     );
     if (backfillError) return fail(res, 400, backfillError.message);
   }
-  const { orderBy = 'id', branchId, workDate, workDateFrom, workDateTo } = req.query;
   let query = db.from(table).select(selectFor(req.actor, table));
   query = applyBranchScope(query, req.actor, table);
   if (table === 'attendance') {
