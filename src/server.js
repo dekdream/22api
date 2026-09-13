@@ -86,6 +86,7 @@ const tableSelect = {
   leave_requests: '*, leave_type(name), employees!leave_requests_employee_id_fkey(employee_code, first_name, last_name, branch_id)',
   commission: '*, employees!commission_employee_id_fkey(employee_code, first_name, last_name, branch_id)',
   queue_bookings: '*, services(name), employees!queue_bookings_employee_id_fkey(first_name, last_name, employee_code), branches(branch_name)',
+  purchase_requests: '*, employees!purchase_requests_requester_id_fkey(first_name, last_name, phone)',
 };
 // PostgREST only filters the parent rows through an embedded relation when
 // the relation is marked `!inner`.
