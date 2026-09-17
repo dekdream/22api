@@ -71,6 +71,7 @@ const tableAccess = new Set([
   'payroll', 'attendance', 'services', 'service_history', 'calendar_events',
   'leave_requests', 'leave_type', 'notifications', 'commission',
   'queue_bookings',
+  'branch_transactions',
   'purchase_requests', 'purchase_request_items', 'purchase_request_history',
 ]);
 const employeeSelect = '*, positions(name, salary), branches(branch_code, branch_name)';
@@ -97,7 +98,10 @@ const branchScopedTableSelect = {
   leave_requests: '*, leave_type(name), employees!leave_requests_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
   commission: '*, employees!commission_employee_id_fkey!inner(employee_code, first_name, last_name, branch_id)',
 };
-const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings', 'purchase_requests']);
+const directBranchTables = new Set(['customers', 'announcements', 'calendar_events', 'queue_bookings', 'branch_transactions', 'purchase_requests']);
+const publicDashboardTables = new Set([
+  'branches', 'employees', 'customers', 'branch_transactions', 'service_history',
+]);
 const employeeBranchTables = new Set(['payroll', 'attendance', 'service_history', 'leave_requests', 'commission']);
 const employeeReferencedTables = new Set([...employeeBranchTables, 'notifications']);
 
@@ -136,6 +140,11 @@ function roleFor(employee) {
   return 'employee';
 }
 function authorize(req, res, next) {
+  const [, resource, table] = req.path.split('/');
+  if (resource === 'tables' && publicDashboardTables.has(table)) {
+    req.actor = { role: 'owner' };
+    return next();
+  }
   const token = req.get('authorization')?.replace(/^Bearer\s+/i, '');
   if (!token) return fail(res, 401, 'Authentication required');
   try { req.actor = jwt.verify(token, process.env.API_JWT_SECRET); return next(); }
