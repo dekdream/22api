@@ -4,7 +4,7 @@ const { Pool } = pg;
 const tableNames = new Set([
   'branches', 'departments', 'positions', 'employees', 'customers', 'announcements',
   'payroll', 'attendance', 'services', 'service_history', 'calendar_events',
-  'leave_requests', 'leave_type', 'notifications', 'commission', 'queue_bookings',
+  'leave_requests', 'leave_type', 'notifications', 'commission', 'queue_bookings','branch_transactions',
   'purchase_requests', 'purchase_request_items', 'purchase_request_history',
 ]);
 
