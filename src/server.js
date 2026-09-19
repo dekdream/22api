@@ -531,7 +531,7 @@ app.post('/v1/purchase-requests/:id/action', async (req, res) => {
 
 app.get('/v1/tables/:table', guardTableRead, async (req, res) => {
   const { table } = req.params;
-  const { orderBy = 'id', branchId, workDate, workDateFrom, workDateTo } = req.query;
+  const { orderBy = 'id', branchId, employeeId, workDate, workDateFrom, workDateTo } = req.query;
 
   // Purchase requests need the requester contact on every client. Use an
   // explicit SQL join here instead of relying on PostgREST relation naming.
@@ -585,6 +585,9 @@ app.get('/v1/tables/:table', guardTableRead, async (req, res) => {
   }
   let query = db.from(table).select(selectFor(req.actor, table));
   query = applyBranchScope(query, req.actor, table);
+  if (table === 'service_history' && employeeId) {
+    query = query.eq('employee_id', employeeId);
+  }
   if (table === 'attendance') {
     if (workDate) query = query.eq('work_date', workDate);
     if (workDateFrom) query = query.gte('work_date', workDateFrom);
